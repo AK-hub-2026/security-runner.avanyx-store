@@ -1,1 +1,78 @@
 
+name: AVANYX APK Metadata Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: "Public GitHub Release URL of the APK"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-apk:
+    name: Inspect APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate and download APK
+        shell: bash
+        env:
+          APK_URL: ${{ inputs.apk_url }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$APK_URL" =~ ^https://github\.com/[^/]+/[^/]+/releases/download/[^/]+/[^/]+\.apk$ ]]; then
+            echo "Error: Enter a direct HTTPS GitHub Release APK URL."
+            exit 1
+          fi
+
+          curl --fail --location --silent --show-error \
+            --max-filesize 200000000 \
+            "$APK_URL" --output sample.apk
+
+          if [[ ! -s sample.apk ]]; then
+            echo "Error: APK download is empty."
+            exit 1
+          fi
+
+          if ! unzip -t sample.apk >/dev/null; then
+            echo "Error: File is not a valid ZIP/APK container."
+            exit 1
+          fi
+
+          echo "APK downloaded and archive integrity check passed."
+          echo "SHA-256:"
+          sha256sum sample.apk
+
+      - name: Extract APK metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check androguard
+
+          python - <<'PY'
+          from androguard.core.apk import APK
+
+          apk = APK("sample.apk")
+
+          if not apk.is_valid_APK():
+              raise SystemExit("Error: APK manifest could not be validated.")
+
+          print("Package:", apk.get_package())
+          print("App name:", apk.get_app_name())
+          print("Permissions:")
+          for permission in sorted(set(apk.get_permissions())):
+              print("-", permission)
+
+          print("Metadata extraction completed.")
+          PY
