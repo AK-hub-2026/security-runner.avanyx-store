@@ -1,7 +1,7 @@
 
 name: AVANYX APK Metadata Check
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       apk_url:
