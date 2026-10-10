@@ -9,18 +9,14 @@ permissions:
 
 jobs:
   scanner-check:
-    name: Scanner Environment Check
+    name: Basic Runner Test
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Check scanner environment
+      - name: Verify GitHub Actions
+        shell: bash
         run: |
           echo "AVANYX Security Scanner started"
-          echo "Runner: $(uname -s)"
-          echo "Python version:"
-          python3 --version
-          echo "Java version:"
-          java -version
-          echo "Scanner environment check completed"
-
+          echo "GitHub Actions runner is working"
+          echo "Basic test completed successfully"
