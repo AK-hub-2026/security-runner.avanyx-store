@@ -74,5 +74,14 @@ jobs:
           for permission in sorted(set(apk.get_permissions())):
               print("-", permission)
 
-          print("Metadata extraction completed.")
+          print("Metadata extraction completed") 
+
+          
+      - name: Extract APK metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check androguard
+          python -c 'from pathlib import Path; from androguard.core.apk import APK; p=Path("sample.apk"); a=APK(str(p)); print("========== AVANYX APK REPORT =========="); print("APK File Name:", p.name); print("App Name:", a.get_app_name()); print("Package Name:", a.get_package()); print("File Size (bytes):", p.stat().st_size); print("Permissions:"); [print("-", x) for x in sorted(set(a.get_permissions()))]; print("Metadata extraction completed.") if a.is_valid_APK() else exit("Invalid APK")'
+          
           PY
