@@ -14,9 +14,12 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Verify GitHub Actions
+      
+      - name: Check scanner dependencies
         shell: bash
         run: |
-          echo "AVANYX Security Scanner started"
-          echo "GitHub Actions runner is working"
-          echo "Basic test completed successfully"
+          echo "Checking Python..."
+          python3 --version
+          echo "Checking Java..."
+          java -version
+          echo "Dependency check completed"
