@@ -1,1 +1,26 @@
 
+name: AVANYX Security Scanner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scanner-check:
+    name: Scanner Environment Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check scanner environment
+        run: |
+          echo "AVANYX Security Scanner started"
+          echo "Runner: $(uname -s)"
+          echo "Python version:"
+          python3 --version
+          echo "Java version:"
+          java -version
+          echo "Scanner environment check completed"
+
