@@ -164,6 +164,7 @@ jobs:
               print(f"Security Score: {score}/100")
           else:
               print("Security Score not provided by scorecard.")
+
           print("AVANYX scan completed.")
           PY
 
@@ -177,6 +178,7 @@ jobs:
           import hashlib
           from pathlib import Path
           from datetime import datetime, timezone
+          from collections import Counter
 
           def load_json(filename):
               data = json.loads(Path(filename).read_text(encoding="utf-8"))
@@ -205,21 +207,25 @@ jobs:
           digest = hashlib.sha256(apk_path.read_bytes()).hexdigest()
 
           score = scorecard.get("security_score")
-          summary = scorecard.get("summary")
-          if not isinstance(summary, dict):
-              summary = {}
+
+          # Preserve MobSF's own summary separately when available.
+          mobsf_summary = scorecard.get("summary")
+          if not isinstance(mobsf_summary, dict):
+              mobsf_summary = None
 
           findings = []
           seen = set()
+
           severity_names = {
-              "critical", "high", "warning", "medium", "moderate", "low", "info"
+              "critical", "high", "warning",
+              "medium", "moderate", "low", "info"
           }
 
           def walk(obj):
               if isinstance(obj, dict):
                   severity = str(
                       obj.get("severity") or obj.get("risk") or ""
-                  ).lower()
+                  ).strip().lower()
 
                   title = (
                       obj.get("title")
@@ -235,7 +241,9 @@ jobs:
                   )
 
                   if severity in severity_names and (title or description):
-                      title = str(title or str(description).split("\n")[0][:180])
+                      title = str(
+                          title or str(description).split("\n")[0][:180]
+                      )
                       description = str(description)
 
                       item = {
@@ -263,8 +271,34 @@ jobs:
 
           walk(report)
 
+          # Count the extracted findings by their detected severity.
+          severity_order = [
+              "critical", "high", "warning",
+              "medium", "moderate", "low", "info"
+          ]
+
+          severity_counts = Counter(
+              item["severity"] for item in findings
+          )
+
+          summary = {
+              severity: severity_counts.get(severity, 0)
+              for severity in severity_order
+          }
+
+          summary["total_extracted_findings"] = len(findings)
+          summary["counting_method"] = (
+              "Counts are based on deduplicated, severity-tagged findings "
+              "extracted from the MobSF JSON report."
+          )
+          summary["interpretation"] = (
+              "These counts are not guaranteed to equal MobSF's official "
+              "summary or the number of unique underlying vulnerabilities. "
+              "Findings may require manual verification."
+          )
+
           result = {
-              "report_format_version": "1.0",
+              "report_format_version": "1.1",
               "generated_at_utc": datetime.now(timezone.utc).isoformat(),
               "scanner": "MobSF static analysis",
               "apk": {
@@ -278,15 +312,21 @@ jobs:
               },
               "security": {
                   "score": score,
-                  "score_source": "MobSF scorecard" if score is not None else None,
+                  "score_source": (
+                      "MobSF scorecard" if score is not None else None
+                  ),
                   "summary": summary,
+                  "mobsf_scorecard_summary": mobsf_summary,
                   "severity_tagged_findings_extracted": len(findings),
                   "findings": findings
               },
               "limitations": [
                   "This is an automated static analysis report, not proof of complete security.",
+                  "Counts represent extracted findings and may not match MobSF's official summary.",
+                  "Exact duplicate extracted findings are removed; similar findings may still represent the same underlying issue.",
                   "Finding extraction depends on fields and severity labels returned by the MobSF version in use.",
-                  "An absent finding does not prove that no vulnerability exists."
+                  "An absent finding does not prove that no vulnerability exists.",
+                  "Review findings manually before deciding whether a change is necessary."
               ]
           }
 
@@ -302,6 +342,10 @@ jobs:
           print("Version:", result["apk"]["version_name"] or "Not returned by scanner")
           print("Security score:", score if score is not None else "Not returned")
           print("Extracted findings:", len(findings))
+          print("Severity counts:")
+          for severity in severity_order:
+              print(f"  {severity}: {summary[severity]}")
+          print("Total extracted findings:", summary["total_extracted_findings"])
           PY
 
       - name: Upload downloadable report
