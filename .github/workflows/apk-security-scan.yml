@@ -1,1 +1,136 @@
 
+name: AVANYX APK Security Scan
+
+"on":
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: "Direct public GitHub Release URL of the test APK"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  security-scan:
+    name: MobSF Static Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download test APK
+        shell: bash
+        env:
+          APK_URL: ${{ inputs.apk_url }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$APK_URL" =~ ^https://github\.com/[^/]+/[^/]+/releases/download/[^/]+/[^/]+\.apk$ ]]; then
+            echo "ERROR: Use a direct public GitHub Release APK URL."
+            exit 1
+          fi
+
+          curl --fail --location --silent --show-error \
+            --max-filesize 200000000 \
+            "$APK_URL" --output sample.apk
+
+          test -s sample.apk
+          unzip -t sample.apk >/dev/null
+          echo "APK downloaded; archive integrity check passed."
+          sha256sum sample.apk
+
+      - name: Start MobSF
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull opensecurity/mobile-security-framework-mobsf:latest
+          docker run -d --name avanyx-mobsf \
+            -p 8000:8000 \
+            opensecurity/mobile-security-framework-mobsf:latest
+
+      - name: Wait for MobSF API
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for i in $(seq 1 120); do
+            API_KEY=$(docker logs avanyx-mobsf 2>&1 |
+              grep -F "REST API Key" |
+              grep -Eo '[0-9a-fA-F]{64}' |
+              tail -n 1 || true)
+
+            if [[ -n "$API_KEY" ]] &&
+               curl --silent --fail http://127.0.0.1:8000/ >/dev/null; then
+              echo "::add-mask::$API_KEY"
+              echo "MobSF API is ready."
+              echo "MOBSF_API_KEY=$API_KEY" >> "$GITHUB_ENV"
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "ERROR: MobSF API did not become ready."
+          exit 1
+
+      - name: Upload APK to MobSF
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl --silent --show-error --fail \
+            --max-time 120 \
+            -H "Authorization: $MOBSF_API_KEY" \
+            -F "file=@sample.apk" \
+            http://127.0.0.1:8000/api/v1/upload \
+            --output upload.json
+
+          python3 - <<'PY'
+          import json
+          with open("upload.json", encoding="utf-8") as f:
+              data = json.load(f)
+          if not data.get("hash"):
+              raise SystemExit("MobSF upload failed: no scan hash returned.")
+          with open("scan_hash.txt", "w", encoding="utf-8") as f:
+              f.write(data["hash"])
+          print("APK accepted by MobSF.")
+          print("File:", data.get("file_name", "Not returned"))
+          print("Scan type:", data.get("scan_type", "Not returned"))
+          PY
+
+      - name: Run static security analysis
+        shell: bash
+        run: |
+          set -euo pipefail
+          SCAN_HASH=$(cat scan_hash.txt)
+
+          curl --silent --show-error --fail \
+            --max-time 1200 \
+            -H "Authorization: $MOBSF_API_KEY" \
+            --data-urlencode "hash=$SCAN_HASH" \
+            http://127.0.0.1:8000/api/v1/scan \
+            --output scan-response.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("scan-response.json").read_text())
+          if data.get("error"):
+              raise SystemExit("MobSF scan error: " + str(data["error"]))
+
+          print("Static analysis response received.")
+          for key in ("file_name", "app_name", "package_name",
+                      "version_name", "security_score"):
+              if key in data:
+                  print(f"{key}: {data[key]}")
+
+          print("Report sections returned:", ", ".join(sorted(data.keys())))
+          print("AVANYX scan workflow completed.")
+          PY
+
+      - name: Stop MobSF
+        if: always()
+        shell: bash
+        run: docker rm -f avanyx-mobsf || true
