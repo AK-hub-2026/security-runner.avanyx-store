@@ -31,14 +31,22 @@ jobs:
             exit 1
           fi
 
+          ORIGINAL_APK_NAME=$(basename "$APK_URL")
+
           curl --fail --location --silent --show-error \
             --max-filesize 200000000 \
             "$APK_URL" --output sample.apk
 
           test -s sample.apk
           unzip -t sample.apk >/dev/null
+
+          printf '%s\n' "$ORIGINAL_APK_NAME" > original-apk-name.txt
+          sha256sum sample.apk | awk '{print $1}' > apk-sha256.txt
+
           echo "APK downloaded; archive integrity check passed."
-          sha256sum sample.apk
+          echo "Original APK filename: $ORIGINAL_APK_NAME"
+          echo "SHA-256:"
+          cat apk-sha256.txt
 
       - name: Start MobSF
         shell: bash
@@ -88,14 +96,17 @@ jobs:
 
           python3 - <<'PY'
           import json
+
           with open("upload.json", encoding="utf-8") as f:
               data = json.load(f)
+
           if not data.get("hash"):
               raise SystemExit("MobSF upload failed: no scan hash returned.")
+
           with open("scan_hash.txt", "w", encoding="utf-8") as f:
               f.write(data["hash"])
+
           print("APK accepted by MobSF.")
-          print("File:", data.get("file_name", "Not returned"))
           print("Scan type:", data.get("scan_type", "Not returned"))
           PY
 
@@ -142,73 +153,164 @@ jobs:
           scorecard = load_json("scorecard.json")
           report = load_json("report.json")
 
-          print("\n========== AVANYX SECURITY REPORT ==========")
-          for key in ("app_name", "package_name", "version_name", "file_name"):
+          print("Static analysis response received.")
+          for key in ("app_name", "package_name", "version_name", "version_code"):
               value = scan.get(key) or report.get(key)
               if value is not None:
                   print(f"{key}: {value}")
 
           score = scorecard.get("security_score")
           if score is not None:
-              print(f"\nSecurity Score: {score}/100")
+              print(f"Security Score: {score}/100")
           else:
-              print("\nSecurity Score: Not provided by this MobSF response")
+              print("Security Score not provided by scorecard.")
+          print("AVANYX scan completed.")
+          PY
 
+      - name: Build downloadable JSON report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import hashlib
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          def load_json(filename):
+              data = json.loads(Path(filename).read_text(encoding="utf-8"))
+              if not isinstance(data, dict):
+                  raise SystemExit(f"Unexpected JSON format: {filename}")
+              if data.get("error"):
+                  raise SystemExit(f"MobSF error in {filename}: {data['error']}")
+              return data
+
+          scan = load_json("scan-response.json")
+          scorecard = load_json("scorecard.json")
+          report = load_json("report.json")
+
+          def actual_value(key):
+              for source in (scan, report):
+                  value = source.get(key)
+                  if value not in (None, ""):
+                      return value
+              return None
+
+          apk_path = Path("sample.apk")
+          apk_name = Path("original-apk-name.txt").read_text(
+              encoding="utf-8"
+          ).strip()
+
+          digest = hashlib.sha256(apk_path.read_bytes()).hexdigest()
+
+          score = scorecard.get("security_score")
           summary = scorecard.get("summary")
-          if isinstance(summary, dict):
-              print("\n========== FINDINGS SUMMARY ==========")
-              for level, count in summary.items():
-                  if isinstance(count, (int, float, str)):
-                      print(f"{str(level).upper()}: {count}")
+          if not isinstance(summary, dict):
+              summary = {}
 
           findings = []
           seen = set()
           severity_names = {
-              "critical", "high", "warning", "medium", "low", "info"
+              "critical", "high", "warning", "medium", "moderate", "low", "info"
           }
 
           def walk(obj):
               if isinstance(obj, dict):
-                  severity = str(obj.get("severity", "")).lower()
-                  title = obj.get("title") or obj.get("issue") or obj.get("rule")
-                  description = obj.get("description") or obj.get("details") or ""
+                  severity = str(
+                      obj.get("severity") or obj.get("risk") or ""
+                  ).lower()
+
+                  title = (
+                      obj.get("title")
+                      or obj.get("issue")
+                      or obj.get("rule")
+                      or obj.get("name")
+                  )
+
+                  description = (
+                      obj.get("description")
+                      or obj.get("details")
+                      or ""
+                  )
 
                   if severity in severity_names and (title or description):
-                      item = (severity, str(title or "Untitled finding"),
-                              str(description))
-                      if item not in seen:
-                          seen.add(item)
+                      title = str(title or str(description).split("\n")[0][:180])
+                      description = str(description)
+
+                      item = {
+                          "severity": severity,
+                          "title": title,
+                          "description": description[:1500]
+                      }
+
+                      identity = (
+                          item["severity"],
+                          item["title"],
+                          item["description"]
+                      )
+
+                      if identity not in seen:
+                          seen.add(identity)
                           findings.append(item)
 
                   for value in obj.values():
                       walk(value)
+
               elif isinstance(obj, list):
                   for value in obj:
                       walk(value)
 
           walk(report)
 
-          important = [
-              item for item in findings
-              if item[0] in ("critical", "high", "warning", "medium")
-          ]
+          result = {
+              "report_format_version": "1.0",
+              "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+              "scanner": "MobSF static analysis",
+              "apk": {
+                  "filename": apk_name,
+                  "app_name": actual_value("app_name"),
+                  "package_name": actual_value("package_name"),
+                  "version_name": actual_value("version_name"),
+                  "version_code": actual_value("version_code"),
+                  "sha256": digest,
+                  "size_bytes": apk_path.stat().st_size
+              },
+              "security": {
+                  "score": score,
+                  "score_source": "MobSF scorecard" if score is not None else None,
+                  "summary": summary,
+                  "severity_tagged_findings_extracted": len(findings),
+                  "findings": findings
+              },
+              "limitations": [
+                  "This is an automated static analysis report, not proof of complete security.",
+                  "Finding extraction depends on fields and severity labels returned by the MobSF version in use.",
+                  "An absent finding does not prove that no vulnerability exists."
+              ]
+          }
 
-          print("\n========== IMPORTANT FINDINGS ==========")
-          if important:
-              for severity, title, description in important[:20]:
-                  print(f"\n[{severity.upper()}] {title[:200]}")
-                  if description:
-                      print("Details:", description.replace("\n", " ")[:350])
-              if len(important) > 20:
-                  print(f"Additional findings not displayed: {len(important) - 20}")
-          else:
-              print("No matching findings extracted by the current parser.")
-              print("This does NOT prove the app has no security issues.")
-              print("Check MobSF report fields if findings are missing.")
+          Path("AVANYX-Security-Report.json").write_text(
+              json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8"
+          )
 
-          print(f"\nSeverity-tagged findings extracted: {len(findings)}")
-          print("Static analysis and report retrieval completed.")
+          print("JSON security report created.")
+          print("APK filename:", apk_name)
+          print("App name:", result["apk"]["app_name"] or "Not returned by scanner")
+          print("Package:", result["apk"]["package_name"] or "Not returned by scanner")
+          print("Version:", result["apk"]["version_name"] or "Not returned by scanner")
+          print("Security score:", score if score is not None else "Not returned")
+          print("Extracted findings:", len(findings))
           PY
+
+      - name: Upload downloadable report
+        uses: actions/upload-artifact@v4
+        with:
+          name: AVANYX-Security-Report
+          path: AVANYX-Security-Report.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Stop MobSF
         if: always()
