@@ -1,1 +1,57 @@
 
+name: AVANYX MobSF Engine Test
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mobsf-test:
+    name: Start MobSF Engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Pull MobSF Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull opensecurity/mobile-security-framework-mobsf:latest
+
+      - name: Start and test MobSF
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run -d \
+            --name avanyx-mobsf \
+            -p 8000:8000 \
+            opensecurity/mobile-security-framework-mobsf:latest
+
+          for i in $(seq 1 120); do
+            status=$(curl -sS -o /dev/null \
+              -w '%{http_code}' \
+              http://127.0.0.1:8000/ || true)
+
+            if [[ "$status" =~ ^[23][0-9][0-9]$ ]]; then
+              echo "SUCCESS: MobSF web service responded with HTTP $status"
+              docker logs --tail 30 avanyx-mobsf
+              exit 0
+            fi
+
+            if [[ "$i" -eq 120 ]]; then
+              echo "ERROR: MobSF did not become ready in time."
+              docker logs --tail 100 avanyx-mobsf
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: docker rm -f avanyx-mobsf || true
+
