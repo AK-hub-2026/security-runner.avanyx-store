@@ -112,22 +112,102 @@ jobs:
             http://127.0.0.1:8000/api/v1/scan \
             --output scan-response.json
 
+          curl --silent --show-error --fail \
+            --max-time 120 \
+            -H "Authorization: $MOBSF_API_KEY" \
+            --data-urlencode "hash=$SCAN_HASH" \
+            http://127.0.0.1:8000/api/v1/scorecard \
+            --output scorecard.json
+
+          curl --silent --show-error --fail \
+            --max-time 120 \
+            -H "Authorization: $MOBSF_API_KEY" \
+            --data-urlencode "hash=$SCAN_HASH" \
+            http://127.0.0.1:8000/api/v1/report_json \
+            --output report.json
+
           python3 - <<'PY'
           import json
           from pathlib import Path
 
-          data = json.loads(Path("scan-response.json").read_text())
-          if data.get("error"):
-              raise SystemExit("MobSF scan error: " + str(data["error"]))
+          def load_json(filename):
+              data = json.loads(Path(filename).read_text(encoding="utf-8"))
+              if not isinstance(data, dict):
+                  raise SystemExit(f"Unexpected JSON format: {filename}")
+              if data.get("error"):
+                  raise SystemExit(f"MobSF error in {filename}: {data['error']}")
+              return data
 
-          print("Static analysis response received.")
-          for key in ("file_name", "app_name", "package_name",
-                      "version_name", "security_score"):
-              if key in data:
-                  print(f"{key}: {data[key]}")
+          scan = load_json("scan-response.json")
+          scorecard = load_json("scorecard.json")
+          report = load_json("report.json")
 
-          print("Report sections returned:", ", ".join(sorted(data.keys())))
-          print("AVANYX scan workflow completed.")
+          print("\n========== AVANYX SECURITY REPORT ==========")
+          for key in ("app_name", "package_name", "version_name", "file_name"):
+              value = scan.get(key) or report.get(key)
+              if value is not None:
+                  print(f"{key}: {value}")
+
+          score = scorecard.get("security_score")
+          if score is not None:
+              print(f"\nSecurity Score: {score}/100")
+          else:
+              print("\nSecurity Score: Not provided by this MobSF response")
+
+          summary = scorecard.get("summary")
+          if isinstance(summary, dict):
+              print("\n========== FINDINGS SUMMARY ==========")
+              for level, count in summary.items():
+                  if isinstance(count, (int, float, str)):
+                      print(f"{str(level).upper()}: {count}")
+
+          findings = []
+          seen = set()
+          severity_names = {
+              "critical", "high", "warning", "medium", "low", "info"
+          }
+
+          def walk(obj):
+              if isinstance(obj, dict):
+                  severity = str(obj.get("severity", "")).lower()
+                  title = obj.get("title") or obj.get("issue") or obj.get("rule")
+                  description = obj.get("description") or obj.get("details") or ""
+
+                  if severity in severity_names and (title or description):
+                      item = (severity, str(title or "Untitled finding"),
+                              str(description))
+                      if item not in seen:
+                          seen.add(item)
+                          findings.append(item)
+
+                  for value in obj.values():
+                      walk(value)
+              elif isinstance(obj, list):
+                  for value in obj:
+                      walk(value)
+
+          walk(report)
+
+          important = [
+              item for item in findings
+              if item[0] in ("critical", "high", "warning", "medium")
+          ]
+
+          print("\n========== IMPORTANT FINDINGS ==========")
+          if important:
+              for severity, title, description in important[:20]:
+                  print(f"\n[{severity.upper()}] {title[:200]}")
+                  if description:
+                      print("Details:", description.replace("\n", " ")[:350])
+              if len(important) > 20:
+                  print(f"Additional findings not displayed: {len(important) - 20}")
+          else:
+              print("No matching findings extracted by the current parser.")
+              print("This does NOT prove the app has no security issues.")
+              print("Check MobSF report fields if findings are missing.")
+
+          print(f"\nSeverity-tagged findings extracted: {len(findings)}")
+          print("Static analysis and report retrieval completed.")
           PY
 
       - name: Stop MobSF
